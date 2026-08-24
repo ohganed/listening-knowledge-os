@@ -1,0 +1,10 @@
+{
+  "name": "Listening Knowledge OS",
+  "short_name": "Listening OS",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0d0f13",
+  "theme_color": "#0d0f13",
+  "description": "Turn listening into knowledge."
+}
