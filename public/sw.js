@@ -1,4 +1,4 @@
-const CACHE = "listening-knowledge-os-v1";
+const CACHE = "listening-knowledge-os-v2";
 const ASSETS = ["./", "./index.html"];
 
 self.addEventListener("install", event => {
@@ -18,6 +18,6 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   event.respondWith(
-    caches.match(event.request).then(cached => cached || fetch(event.request))
+    fetch(event.request).catch(() => caches.match(event.request))
   );
 });
