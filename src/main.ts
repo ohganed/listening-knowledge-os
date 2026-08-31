@@ -1,11 +1,20 @@
 type MarkerType = "unclear" | "interesting" | "important" | "language" | "connection";
-type Screen = "start" | "quick" | "commute" | "recent" | "learning" | "inbox";
+type Screen = "start" | "quick" | "commute" | "recent" | "learning" | "candidate" | "inbox";
+type KnowledgeCandidateType = "concept" | "expression" | "question" | "idea";
 
 interface ListeningMarker {
   id: string;
   type: MarkerType;
   createdAt: number;
   playbackSeconds?: number;
+}
+
+interface KnowledgeCandidate {
+  id: string;
+  type: KnowledgeCandidateType;
+  title: string;
+  summary: string;
+  sourceText?: string;
 }
 
 interface KnowledgeDraft {
@@ -15,6 +24,7 @@ interface KnowledgeDraft {
   note: string;
   createdAt: string;
   status: "inbox";
+  candidateType?: KnowledgeCandidateType;
 }
 
 const RECENT_WINDOW_MS = 5 * 60 * 1000;
@@ -31,16 +41,25 @@ const markerMeta: Record<MarkerType, { icon: string; label: string }> = {
   connection: { icon: "🔗", label: "Connect" },
 };
 
+const candidateMeta: Record<KnowledgeCandidateType, { icon: string; label: string }> = {
+  concept: { icon: "🧠", label: "Concept" },
+  expression: { icon: "💬", label: "Expression" },
+  question: { icon: "❓", label: "Question" },
+  idea: { icon: "💡", label: "Idea" },
+};
+
 const state: {
   screen: Screen;
   markers: ListeningMarker[];
   drafts: KnowledgeDraft[];
   selectedMarkerId?: string;
+  candidates: KnowledgeCandidate[];
   quickType: MarkerType;
 } = {
   screen: "start",
   markers: [],
   drafts: [],
+  candidates: [],
   quickType: "unclear",
 };
 
@@ -160,6 +179,46 @@ async function captureMarker(type: MarkerType) {
   await saveMarker(type);
   renderCommute();
   requestAnimationFrame(() => showToast(`✓ ${markerMeta[type].label} saved`));
+}
+
+function candidateTypeForMarker(type: MarkerType): KnowledgeCandidateType {
+  switch (type) {
+    case "language": return "expression";
+    case "unclear": return "question";
+    case "connection": return "idea";
+    case "important":
+    case "interesting":
+    default: return "concept";
+  }
+}
+
+/**
+ * v0.2 fallback extractor.
+ * This is deliberately deterministic so the core flow works offline and
+ * never requires AI to decide what becomes knowledge. A future AI provider
+ * can replace this function while keeping the same KnowledgeCandidate model.
+ */
+async function extractKnowledgeCandidates(
+  sourceText: string,
+  markerType: MarkerType,
+): Promise<KnowledgeCandidate[]> {
+  const normalized = sourceText.trim();
+  if (!normalized) return [];
+
+  const chunks = normalized
+    .split(/(?:\n+|(?<=[.!?。！？])\s+)/)
+    .map(text => text.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+
+  const type = candidateTypeForMarker(markerType);
+  return chunks.map(text => ({
+    id: uid("candidate"),
+    type,
+    title: text.length > 42 ? `${text.slice(0, 42)}…` : text,
+    summary: text,
+    sourceText: normalized,
+  }));
 }
 
 function renderStart() {
@@ -305,28 +364,73 @@ function renderLearning() {
     <section class="card stack">
       <div class="meta"><div><small>TYPE</small>${meta.label}</div><div><small>AUDIBLE POSITION</small>${formatPlayback(marker.playbackSeconds)}</div></div>
       <div class="card" style="padding:14px"><div class="brand">RELISTEN HINT</div><p class="subtle" style="margin-bottom:0">${marker.playbackSeconds != null ? `まず ${formatPlayback(Math.max(0, marker.playbackSeconds - 20))} 付近から聞き直す` : "再生位置は未入力です"}</p></div>
-      <label><div class="subtle" style="margin-bottom:8px">My Note</div><textarea id="note" placeholder="一言だけでもOK。あとでKnowledgeへ育てます。"></textarea></label>
-      <button class="primary" id="saveBtn">SAVE TO INBOX</button>
+      <label><div class="subtle" style="margin-bottom:8px">What did you learn?</div><textarea id="note" placeholder="一言だけでもOK。候補を出してから、残すものを自分で選びます。"></textarea></label>
+      <button class="primary" id="candidateBtn">FIND KNOWLEDGE CANDIDATES</button>
       <button class="ghost" id="recentBtn">Back to Timeline</button>
     </section>
   `);
-  document.querySelector("#saveBtn")?.addEventListener("click", async () => {
+  document.querySelector("#candidateBtn")?.addEventListener("click", async () => {
     const note = (document.querySelector<HTMLTextAreaElement>("#note")?.value ?? "").trim();
-    const draft: KnowledgeDraft = { id: uid("draft"), markerId: marker.id, type: marker.type, note, createdAt: new Date().toISOString(), status: "inbox" };
-    state.drafts.unshift(draft);
-    await putRecord(DRAFT_STORE, draft);
-    showToast("✓ Saved to Inbox");
-    setTimeout(() => navigate("commute"), 450);
+    state.candidates = await extractKnowledgeCandidates(note, marker.type);
+    if (!state.candidates.length) {
+      showToast("Add a short note first");
+      return;
+    }
+    navigate("candidate");
   });
   document.querySelector("#listenBtn")?.addEventListener("click", () => navigate("commute"));
   document.querySelector("#recentBtn")?.addEventListener("click", () => navigate("recent"));
 }
 
+function renderCandidate() {
+  const marker = state.markers.find(m => m.id === state.selectedMarkerId);
+  if (!marker) { navigate("recent"); return; }
+
+  const rows = state.candidates.length
+    ? state.candidates.map(candidate => {
+      const meta = candidateMeta[candidate.type];
+      return `<button class="card" style="width:100%;text-align:left" data-candidate-id="${candidate.id}"><div class="brand">${meta.icon} ${meta.label}</div><strong>${candidate.title}</strong><p class="subtle" style="margin-bottom:0">Tap to keep this as knowledge.</p></button>`;
+    }).join("")
+    : `<div class="empty">候補はありません。Learning Cardへ戻って短いメモを追加してください。</div>`;
+
+  shell(`
+    <div class="topbar"><div><div class="brand">KNOWLEDGE CANDIDATES</div><h1 class="title">What should remain?</h1></div><button class="ghost" id="listenBtn">Listening</button></div>
+    <section class="card"><p class="subtle" style="margin:0">AIや自動処理は候補を出すだけです。Knowledgeになるのは、あなたが選んだものだけです。</p></section>
+    <section class="stack">${rows}</section>
+    <button class="ghost" id="learningBtn">Back to Learning Card</button>
+  `);
+
+  document.querySelectorAll<HTMLButtonElement>("[data-candidate-id]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const candidate = state.candidates.find(item => item.id === button.dataset.candidateId);
+      if (!candidate) return;
+      const draft: KnowledgeDraft = {
+        id: uid("draft"),
+        markerId: marker.id,
+        type: marker.type,
+        note: candidate.summary,
+        createdAt: new Date().toISOString(),
+        status: "inbox",
+        candidateType: candidate.type,
+      };
+      state.drafts.unshift(draft);
+      await putRecord(DRAFT_STORE, draft);
+      state.candidates = [];
+      showToast("✓ Saved to Inbox");
+      setTimeout(() => navigate("inbox"), 450);
+    });
+  });
+
+  document.querySelector("#listenBtn")?.addEventListener("click", () => navigate("commute"));
+  document.querySelector("#learningBtn")?.addEventListener("click", () => navigate("learning"));
+}
+
 function renderInbox() {
   const rows = state.drafts.length ? state.drafts.map(draft => {
     const meta = markerMeta[draft.type];
+    const candidate = draft.candidateType ? candidateMeta[draft.candidateType] : null;
     const marker = state.markers.find(m => m.id === draft.markerId);
-    return `<div class="card"><div class="topbar"><strong>${meta.icon} ${meta.label}</strong><span class="counter">${formatPlayback(marker?.playbackSeconds)}</span></div><p>${draft.note || "<span class='subtle'>No note yet</span>"}</p><div class="subtle">${new Date(draft.createdAt).toLocaleString()}</div></div>`;
+    return `<div class="card"><div class="topbar"><strong>${meta.icon} ${meta.label}${candidate ? ` · ${candidate.icon} ${candidate.label}` : ""}</strong><span class="counter">${formatPlayback(marker?.playbackSeconds)}</span></div><p>${draft.note || "<span class='subtle'>No note yet</span>"}</p><div class="subtle">${new Date(draft.createdAt).toLocaleString()}</div></div>`;
   }).join("") : `<div class="empty">まだInboxは空です。</div>`;
   shell(`<div class="topbar"><div><div class="brand">KNOWLEDGE INBOX</div><h1 class="title">Captured</h1></div><button class="ghost" id="listenBtn">Listening</button></div><section class="stack">${rows}</section>`);
   document.querySelector("#listenBtn")?.addEventListener("click", () => navigate("commute"));
@@ -339,6 +443,7 @@ function render() {
     case "commute": renderCommute(); break;
     case "recent": renderRecent(); break;
     case "learning": renderLearning(); break;
+    case "candidate": renderCandidate(); break;
     case "inbox": renderInbox(); break;
   }
 }
